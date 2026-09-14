@@ -681,7 +681,7 @@ export default function Home() {
 
 	const onDirectSign = async () => {
 		if (directSignBlockedByTime) {
-			updateActionStatus("error", "当前不在签到时间（开课前30分钟至下课前可签到）");
+			updateActionStatus("error", "当前不在签到时间（开课前10分钟至下课前可签到）");
 			return;
 		}
 
@@ -785,7 +785,7 @@ export default function Home() {
 			return null;
 		}
 
-		const openAt = new Date(classBegin.getTime() - 30 * 60 * 1000);
+		const openAt = new Date(classBegin.getTime() - 10 * 60 * 1000);
 		return {
 			openAt: openAt.getTime(),
 			closeAt: classEnd.getTime()

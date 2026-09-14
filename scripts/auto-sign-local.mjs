@@ -7,11 +7,12 @@ import { fileURLToPath } from "node:url";
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const configPath = join(projectRoot, "config", "ucas-account.json");
 const baseUrl = getBaseUrl(process.argv.slice(2));
-const SIGN_WINDOW_BEFORE_MS = 30 * 60 * 1000;
+const SIGN_WINDOW_BEFORE_MS = 10 * 60 * 1000;
 const SIGN_RETRY_DELAY_MS = 30 * 1000;
 const SCHEDULE_RETRY_DELAY_MS = 5 * 60 * 1000;
-const MAX_SIGN_ATTEMPTS = 3;
 const activeTimers = new Set();
+const activeCourseIds = new Set();
+let scheduleTimer = null;
 
 function getBaseUrl(args) {
 	const index = args.indexOf("--base-url");
@@ -75,11 +76,22 @@ function parseBeijingDateTime(date, value) {
 	return Date.UTC(year, month - 1, day) + clockSeconds * 1000 - 8 * 60 * 60 * 1000;
 }
 
-function nextBeijingMidnight(date) {
+function beijingEight(date) {
 	const year = Number(date.slice(0, 4));
 	const month = Number(date.slice(4, 6));
 	const day = Number(date.slice(6, 8));
-	return Date.UTC(year, month - 1, day + 1) - 8 * 60 * 60 * 1000;
+	return Date.UTC(year, month - 1, day, 8) - 8 * 60 * 60 * 1000;
+}
+
+function nextScheduleAt(now = Date.now()) {
+	const date = getBeijingDateString(new Date(now));
+	const todayEight = beijingEight(date);
+	if (todayEight > now) {
+		return todayEight;
+	}
+
+	const tomorrow = getBeijingDateString(new Date(now + 24 * 60 * 60 * 1000));
+	return beijingEight(tomorrow);
 }
 
 function setTimer(callback, delayMs) {
@@ -91,11 +103,23 @@ function setTimer(callback, delayMs) {
 	return timer;
 }
 
+function setScheduleTimer(callback, delayMs) {
+	if (scheduleTimer) {
+		clearTimeout(scheduleTimer);
+		activeTimers.delete(scheduleTimer);
+	}
+	scheduleTimer = setTimer(async () => {
+		scheduleTimer = null;
+		await callback();
+	}, delayMs);
+}
+
 function clearTimers() {
 	for (const timer of activeTimers) {
 		clearTimeout(timer);
 	}
 	activeTimers.clear();
+	scheduleTimer = null;
 }
 
 async function fetchTodaySchedule(config, date) {
@@ -112,7 +136,7 @@ async function fetchTodaySchedule(config, date) {
 	return data;
 }
 
-async function triggerCourse(config, course, endAt, attempt = 1) {
+async function triggerCourse(config, course, attempt = 1) {
 	try {
 		const response = await fetch(
 			`${baseUrl}/api/course-uuid/cron-sign?courseId=${encodeURIComponent(course.id)}`,
@@ -130,23 +154,21 @@ async function triggerCourse(config, course, endAt, attempt = 1) {
 			} ${data.message ?? ""}`
 		);
 
-		if (data.success || attempt >= MAX_SIGN_ATTEMPTS || Date.now() >= endAt) {
+		if (data.success) {
+			activeCourseIds.delete(course.id);
 			return;
 		}
-		setTimer(() => triggerCourse(config, course, endAt, attempt + 1), SIGN_RETRY_DELAY_MS);
+		setTimer(() => triggerCourse(config, course, attempt + 1), SIGN_RETRY_DELAY_MS);
 	} catch (error) {
 		console.error(
 			`[${new Date().toISOString()}] ${course.courseName || course.id} sign request failed: ${error.message}`
 		);
-		if (attempt < MAX_SIGN_ATTEMPTS && Date.now() < endAt) {
-			setTimer(() => triggerCourse(config, course, endAt, attempt + 1), SIGN_RETRY_DELAY_MS);
-		}
+		setTimer(() => triggerCourse(config, course, attempt + 1), SIGN_RETRY_DELAY_MS);
 	}
 }
 
 async function scheduleToday(config) {
 	const date = getBeijingDateString();
-	clearTimers();
 
 	try {
 		const data = await fetchTodaySchedule(config, date);
@@ -154,7 +176,11 @@ async function scheduleToday(config) {
 		let scheduled = 0;
 
 		for (const course of data.courses ?? []) {
-			if (course.signStatus === "1" || !/^\d{7}$/.test(course.id ?? "")) {
+			if (
+				course.signStatus === "1" ||
+				!/^\d{7}$/.test(course.id ?? "") ||
+				activeCourseIds.has(course.id)
+			) {
 				continue;
 			}
 
@@ -169,7 +195,8 @@ async function scheduleToday(config) {
 				continue;
 			}
 
-			setTimer(() => triggerCourse(config, course, classEnd), runAt - now);
+			activeCourseIds.add(course.id);
+			setTimer(() => triggerCourse(config, course), runAt - now);
 			scheduled += 1;
 			console.log(
 				`scheduled ${course.courseName || course.id} at ${new Date(runAt).toLocaleString("zh-CN", {
@@ -181,18 +208,27 @@ async function scheduleToday(config) {
 		console.log(`[${new Date().toISOString()}] ${date}: checked ${data.total ?? 0}, scheduled ${scheduled}`);
 	} catch (error) {
 		console.error(`[${new Date().toISOString()}] schedule fetch failed: ${error.message}`);
-		setTimer(() => scheduleToday(config), SCHEDULE_RETRY_DELAY_MS);
+		setScheduleTimer(() => scheduleToday(config), SCHEDULE_RETRY_DELAY_MS);
+		return;
 	}
 
-	const nextRefreshDelay = nextBeijingMidnight(date) - Date.now() + 1000;
-	setTimer(() => scheduleToday(config), nextRefreshDelay);
+	const nextRefreshDelay = nextScheduleAt() - Date.now();
+	setScheduleTimer(() => scheduleToday(config), nextRefreshDelay);
 }
 
 try {
 	const config = await readConfig();
 
 	console.log(`Local auto-sign scheduler started for ${baseUrl}`);
-	await scheduleToday(config);
+	const todayEight = beijingEight(getBeijingDateString());
+	if (Date.now() < todayEight) {
+		console.log(`today's schedule will be fetched at ${new Date(todayEight).toLocaleString("zh-CN", {
+			timeZone: "Asia/Shanghai"
+		})}`);
+		setScheduleTimer(() => scheduleToday(config), todayEight - Date.now());
+	} else {
+		await scheduleToday(config);
+	}
 
 	const stop = () => {
 		clearTimers();

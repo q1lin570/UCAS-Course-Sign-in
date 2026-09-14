@@ -240,7 +240,7 @@ export function isCourseInSignWindow(course: AutoSignCourse, date: string, now =
 		return false;
 	}
 
-	return now >= classBegin - 30 * 60 * 1000 && now <= classEnd;
+	return now >= classBegin - 10 * 60 * 1000 && now <= classEnd;
 }
 
 export async function getSigningTimestamp(): Promise<number> {
