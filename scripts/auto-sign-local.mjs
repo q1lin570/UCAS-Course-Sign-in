@@ -7,49 +7,195 @@ import { fileURLToPath } from "node:url";
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const configPath = join(projectRoot, "config", "ucas-account.json");
 const baseUrl = getBaseUrl(process.argv.slice(2));
-const intervalMs = 60 * 1000;
+const SIGN_WINDOW_BEFORE_MS = 30 * 60 * 1000;
+const SIGN_RETRY_DELAY_MS = 30 * 1000;
+const SCHEDULE_RETRY_DELAY_MS = 5 * 60 * 1000;
+const MAX_SIGN_ATTEMPTS = 3;
+const activeTimers = new Set();
 
 function getBaseUrl(args) {
 	const index = args.indexOf("--base-url");
-	return (index >= 0 ? args[index + 1] : "http://127.0.0.1:3000").replace(/\/+$/, "");
+	const requested = index >= 0 ? args[index + 1] : "http://127.0.0.1:3000";
+	return (requested || "http://127.0.0.1:3000").replace(/\/+$/, "");
 }
 
 async function readConfig() {
 	const raw = await readFile(configPath, "utf8");
 	const config = JSON.parse(raw);
+	const username = typeof config?.username === "string" ? config.username.trim() : "";
+	const password = typeof config?.password === "string" ? config.password : "";
+	const cronSecret = typeof config?.cronSecret === "string" ? config.cronSecret.trim() : "";
 	if (
-		typeof config?.cronSecret !== "string" ||
-		!config.cronSecret.trim() ||
-		config.cronSecret.includes("填入")
+		!username ||
+		!password ||
+		!cronSecret ||
+		username.includes("填入") ||
+		password.includes("填入") ||
+		cronSecret.includes("填入")
 	) {
-		throw new Error(`请先填写 ${configPath} 中的 cronSecret`);
+		throw new Error(`请先填写 ${configPath} 中的 username、password 和 cronSecret`);
 	}
-	return { cronSecret: config.cronSecret.trim() };
+	return { username, password, cronSecret };
 }
 
-async function trigger(config) {
+function getBeijingDateString(now = new Date()) {
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone: "Asia/Shanghai",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit"
+	}).formatToParts(now);
+	const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+	return `${values.year}${values.month}${values.day}`;
+}
+
+function parseClockSeconds(value) {
+	const match = value?.match(/(\d{2}):(\d{2})(?::(\d{2}))?$/);
+	if (!match) {
+		return null;
+	}
+	const hours = Number(match[1]);
+	const minutes = Number(match[2]);
+	const seconds = Number(match[3] ?? "0");
+	if (hours > 23 || minutes > 59 || seconds > 59) {
+		return null;
+	}
+	return hours * 3600 + minutes * 60 + seconds;
+}
+
+function parseBeijingDateTime(date, value) {
+	const clockSeconds = parseClockSeconds(value);
+	if (clockSeconds === null || !/^\d{8}$/.test(date)) {
+		return null;
+	}
+
+	const year = Number(date.slice(0, 4));
+	const month = Number(date.slice(4, 6));
+	const day = Number(date.slice(6, 8));
+	return Date.UTC(year, month - 1, day) + clockSeconds * 1000 - 8 * 60 * 60 * 1000;
+}
+
+function nextBeijingMidnight(date) {
+	const year = Number(date.slice(0, 4));
+	const month = Number(date.slice(4, 6));
+	const day = Number(date.slice(6, 8));
+	return Date.UTC(year, month - 1, day + 1) - 8 * 60 * 60 * 1000;
+}
+
+function setTimer(callback, delayMs) {
+	const timer = setTimeout(() => {
+		activeTimers.delete(timer);
+		void callback();
+	}, Math.max(0, delayMs));
+	activeTimers.add(timer);
+	return timer;
+}
+
+function clearTimers() {
+	for (const timer of activeTimers) {
+		clearTimeout(timer);
+	}
+	activeTimers.clear();
+}
+
+async function fetchTodaySchedule(config, date) {
+	const response = await fetch(`${baseUrl}/api/course-uuid/query`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ username: config.username, password: config.password, date }),
+		cache: "no-store"
+	});
+	const data = await response.json();
+	if (!response.ok) {
+		throw new Error(data.message ?? `课表查询失败（HTTP ${response.status}）`);
+	}
+	return data;
+}
+
+async function triggerCourse(config, course, endAt, attempt = 1) {
 	try {
-		const response = await fetch(`${baseUrl}/api/course-uuid/cron-sign`, {
+		const response = await fetch(
+			`${baseUrl}/api/course-uuid/cron-sign?courseId=${encodeURIComponent(course.id)}`,
+			{
 			headers: {
 				Authorization: `Bearer ${config.cronSecret}`
 			},
 			cache: "no-store"
-		});
-		const body = await response.text();
-		console.log(`[${new Date().toISOString()}] auto-sign ${response.status}: ${body}`);
+			}
+		);
+		const data = await response.json();
+		console.log(
+			`[${new Date().toISOString()}] ${course.courseName || course.id} sign attempt ${attempt}: ${
+				response.status
+			} ${data.message ?? ""}`
+		);
+
+		if (data.success || attempt >= MAX_SIGN_ATTEMPTS || Date.now() >= endAt) {
+			return;
+		}
+		setTimer(() => triggerCourse(config, course, endAt, attempt + 1), SIGN_RETRY_DELAY_MS);
 	} catch (error) {
-		console.error(`[${new Date().toISOString()}] auto-sign request failed: ${error.message}`);
+		console.error(
+			`[${new Date().toISOString()}] ${course.courseName || course.id} sign request failed: ${error.message}`
+		);
+		if (attempt < MAX_SIGN_ATTEMPTS && Date.now() < endAt) {
+			setTimer(() => triggerCourse(config, course, endAt, attempt + 1), SIGN_RETRY_DELAY_MS);
+		}
 	}
+}
+
+async function scheduleToday(config) {
+	const date = getBeijingDateString();
+	clearTimers();
+
+	try {
+		const data = await fetchTodaySchedule(config, date);
+		const now = Date.now();
+		let scheduled = 0;
+
+		for (const course of data.courses ?? []) {
+			if (course.signStatus === "1" || !/^\d{7}$/.test(course.id ?? "")) {
+				continue;
+			}
+
+			const classBegin = parseBeijingDateTime(date, course.classBeginTime);
+			const classEnd = parseBeijingDateTime(date, course.classEndTime);
+			if (classBegin === null || classEnd === null) {
+				continue;
+			}
+
+			const runAt = Math.max(now, classBegin - SIGN_WINDOW_BEFORE_MS);
+			if (runAt > classEnd) {
+				continue;
+			}
+
+			setTimer(() => triggerCourse(config, course, classEnd), runAt - now);
+			scheduled += 1;
+			console.log(
+				`scheduled ${course.courseName || course.id} at ${new Date(runAt).toLocaleString("zh-CN", {
+					timeZone: "Asia/Shanghai"
+				})}`
+			);
+		}
+
+		console.log(`[${new Date().toISOString()}] ${date}: checked ${data.total ?? 0}, scheduled ${scheduled}`);
+	} catch (error) {
+		console.error(`[${new Date().toISOString()}] schedule fetch failed: ${error.message}`);
+		setTimer(() => scheduleToday(config), SCHEDULE_RETRY_DELAY_MS);
+	}
+
+	const nextRefreshDelay = nextBeijingMidnight(date) - Date.now() + 1000;
+	setTimer(() => scheduleToday(config), nextRefreshDelay);
 }
 
 try {
 	const config = await readConfig();
+
 	console.log(`Local auto-sign scheduler started for ${baseUrl}`);
-	await trigger(config);
-	const timer = setInterval(() => void trigger(config), intervalMs);
+	await scheduleToday(config);
 
 	const stop = () => {
-		clearInterval(timer);
+		clearTimers();
 		console.log("Local auto-sign scheduler stopped");
 		process.exit(0);
 	};

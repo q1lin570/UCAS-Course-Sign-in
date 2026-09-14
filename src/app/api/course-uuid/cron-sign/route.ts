@@ -89,9 +89,32 @@ export async function GET(request: NextRequest) {
 	}
 
 	const date = getBeijingDateString();
+	const requestedCourseId = new URL(request.url).searchParams.get("courseId")?.trim() ?? "";
+	if (requestedCourseId && !/^\d{7}$/.test(requestedCourseId)) {
+		return json({ message: "课程 ID 格式错误", code: "INVALID_COURSE_ID" }, 400);
+	}
 
 	try {
 		const { sessionId, userId } = await login(config.username, config.password);
+		if (requestedCourseId) {
+			const timestamp = await getSigningTimestamp();
+			const result = await signCourse(sessionId, userId, requestedCourseId, timestamp);
+			const success = result.status === "0" && result.stuSignStatus === "1";
+			return json(
+				{
+					success,
+					date,
+					courseId: requestedCourseId,
+					message: result.message,
+					result: {
+						stuSignId: result.stuSignId,
+						stuSignStatus: result.stuSignStatus
+					}
+				},
+				success ? 200 : 409
+			);
+		}
+
 		const courses = await fetchSchedule(sessionId, userId, date);
 		const candidates = courses.filter(
 			(course) =>
