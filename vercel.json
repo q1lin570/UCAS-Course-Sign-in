@@ -1,0 +1,8 @@
+{
+	"crons": [
+		{
+			"path": "/api/course-uuid/cron-sign",
+			"schedule": "* * * * *"
+		}
+	]
+}
