@@ -61,15 +61,7 @@ npm run lint
 
 ### 自动签到（可选）
 
-项目支持使用服务端定时任务自动签到，浏览器关闭后仍可运行。详细配置见 [`AUTO_SIGN.md`](./AUTO_SIGN.md)。
-
-部署前复制 [`.env.example`](./.env.example) 中的变量到部署平台，并配置：
-
-- `UCAS_USERNAME`：固定使用的学号
-- `UCAS_PASSWORD`：固定使用的密码，仅在服务端环境变量中保存
-- `CRON_SECRET`：保护自动签到接口的随机密钥
-
-根目录的 `vercel.json` 会让 Vercel 每分钟调用自动签到接口。自动签到按北京时间检查当天课程，只在开课前 30 分钟至下课的窗口内处理未签到课程。
+项目支持使用本地配置文件自动签到，浏览器关闭后仍可运行。账号密码保存在 `config/ucas-account.json`，该文件已加入 `.gitignore`，不会上传到远程仓库。详细配置和启动方式见 [`AUTO_SIGN.md`](./AUTO_SIGN.md)。
 
 ### 部署上线（可选）
 

@@ -1,3 +1,7 @@
+import { timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -19,45 +23,75 @@ const RESPONSE_HEADERS = {
 	"Referrer-Policy": "no-referrer",
 	"X-Frame-Options": "DENY"
 };
+const LOCAL_CONFIG_PATH = join(process.cwd(), "config", "ucas-account.json");
+
+type LocalAccountConfig = {
+	username?: unknown;
+	password?: unknown;
+	cronSecret?: unknown;
+};
+
+class LocalConfigError extends Error {}
 
 function json(body: unknown, status = 200) {
 	return NextResponse.json(body, { status, headers: RESPONSE_HEADERS });
 }
 
-function isAuthorized(request: NextRequest): boolean {
-	const expected = process.env.CRON_SECRET?.trim();
-	if (!expected) {
-		return false;
+async function readLocalConfig(): Promise<{ username: string; password: string; cronSecret: string }> {
+	let raw: string;
+	try {
+		raw = await readFile(LOCAL_CONFIG_PATH, "utf8");
+	} catch {
+		throw new LocalConfigError(`找不到本地配置文件：${LOCAL_CONFIG_PATH}`);
 	}
 
+	let parsed: LocalAccountConfig;
+	try {
+		parsed = JSON.parse(raw) as LocalAccountConfig;
+	} catch {
+		throw new LocalConfigError("本地配置文件不是合法 JSON");
+	}
+
+	const username = typeof parsed.username === "string" ? parsed.username.trim() : "";
+	const password = typeof parsed.password === "string" ? parsed.password : "";
+	const cronSecret = typeof parsed.cronSecret === "string" ? parsed.cronSecret.trim() : "";
+	if (!username || !password || !cronSecret || username.includes("填入") || password.includes("填入")) {
+		throw new LocalConfigError("本地配置文件缺少 username、password 或 cronSecret");
+	}
+
+	return { username, password, cronSecret };
+}
+
+function secretsMatch(provided: string, expected: string): boolean {
+	const providedBytes = Buffer.from(provided);
+	const expectedBytes = Buffer.from(expected);
+	return providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes);
+}
+
+function isAuthorized(request: NextRequest, expected: string): boolean {
 	const authorization = request.headers.get("authorization") ?? "";
 	const bearer = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
 	const provided = bearer || request.headers.get("x-cron-secret")?.trim() || "";
-	return provided === expected;
+	return Boolean(provided) && secretsMatch(provided, expected);
 }
 
 export async function GET(request: NextRequest) {
-	if (!process.env.CRON_SECRET?.trim()) {
-		return json({ message: "自动签到未配置 CRON_SECRET", code: "AUTO_SIGN_NOT_CONFIGURED" }, 503);
+	let config: { username: string; password: string; cronSecret: string };
+	try {
+		config = await readLocalConfig();
+	} catch (error) {
+		const message = error instanceof LocalConfigError ? error.message : "本地配置读取失败";
+		return json({ message, code: "LOCAL_CONFIG_ERROR" }, 503);
 	}
 
-	if (!isAuthorized(request)) {
+	if (!isAuthorized(request, config.cronSecret)) {
 		return json({ message: "未授权的自动签到请求" }, 401);
-	}
-
-	const username = process.env.UCAS_USERNAME?.trim() ?? "";
-	const password = process.env.UCAS_PASSWORD ?? "";
-	if (!username || !password) {
-		return json(
-			{ message: "自动签到未配置 UCAS_USERNAME 或 UCAS_PASSWORD", code: "AUTO_SIGN_NOT_CONFIGURED" },
-			503
-		);
 	}
 
 	const date = getBeijingDateString();
 
 	try {
-		const { sessionId, userId } = await login(username, password);
+		const { sessionId, userId } = await login(config.username, config.password);
 		const courses = await fetchSchedule(sessionId, userId, date);
 		const candidates = courses.filter(
 			(course) =>
