@@ -4,7 +4,13 @@
 
 ## 本地配置
 
-首次使用时编辑 `config/ucas-account.json`：
+首次使用时复制配置模板，再编辑 `config/ucas-account.json`：
+
+```bash
+cp config/ucas-account.example.json config/ucas-account.json
+```
+
+然后填写：
 
 ```json
 {
@@ -15,6 +21,7 @@
 ```
 
 该文件已加入 `.gitignore`，不会被 `git add`、提交或推送。不要手动强制添加它。
+仓库只提交 `config/ucas-account.example.json` 模板，不包含真实账号密码。
 
 ## 本地运行
 
