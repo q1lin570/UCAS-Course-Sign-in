@@ -63,6 +63,8 @@ npm run lint
 
 项目支持使用本地配置文件自动签到，浏览器关闭后仍可运行。部署时先执行 `cp config/ucas-account.example.json config/ucas-account.json`，再填写账号密码。真实配置文件已加入 `.gitignore`，不会上传到远程仓库。详细配置和启动方式见 [`AUTO_SIGN.md`](./AUTO_SIGN.md)。
 
+生产服务器请使用 `npm run start:auto`，它会同时启动 Next.js 服务和自动签到调度器；只运行 `npm run start` 不会自动签到。
+
 ### 部署上线（可选）
 
 推荐使用 Vercel 进行部署，步骤如下：
