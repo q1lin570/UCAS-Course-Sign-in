@@ -99,13 +99,17 @@ export async function GET(request: NextRequest) {
 		if (requestedCourseId) {
 			const timestamp = await getSigningTimestamp();
 			const result = await signCourse(sessionId, userId, requestedCourseId, timestamp);
-			const success = result.status === "0" && result.stuSignStatus === "1";
+			let success = result.status === "0" && result.stuSignStatus === "1";
+			if (!success) {
+				const courses = await fetchSchedule(sessionId, userId, date);
+				success = courses.some((course) => course.id === requestedCourseId && course.signStatus === "1");
+			}
 			return json(
 				{
 					success,
 					date,
 					courseId: requestedCourseId,
-					message: result.message,
+					message: success ? "签到成功" : result.message || "签到尚未成功",
 					result: {
 						stuSignId: result.stuSignId,
 						stuSignStatus: result.stuSignStatus

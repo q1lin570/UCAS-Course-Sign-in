@@ -4,6 +4,7 @@
 	"private": true,
 	"scripts": {
 		"dev": "next dev",
+		"dev:auto": "node scripts/start-auto-sign.mjs dev",
 		"build": "next build",
 		"start": "next start",
 		"start:auto": "node scripts/start-auto-sign.mjs",

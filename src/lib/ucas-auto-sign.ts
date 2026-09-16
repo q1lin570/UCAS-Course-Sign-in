@@ -179,7 +179,7 @@ export async function signCourse(
 	const status = data.STATUS ?? "";
 	const stuSignId = data.result?.stuSignId ?? "";
 	const stuSignStatus = data.result?.stuSignStatus ?? "";
-	const message = data.result?.msg ?? data.ERRMSG ?? data.msg ?? data.message ?? "签到失败";
+	const message = data.result?.msg ?? data.ERRMSG ?? data.msg ?? data.message ?? "";
 
 	return { status, message, stuSignId, stuSignStatus };
 }

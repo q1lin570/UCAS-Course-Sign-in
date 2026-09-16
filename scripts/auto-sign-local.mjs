@@ -11,7 +11,7 @@ const SIGN_WINDOW_BEFORE_MS = 10 * 60 * 1000;
 const SIGN_RETRY_DELAY_MS = 30 * 1000;
 const SCHEDULE_RETRY_DELAY_MS = 5 * 60 * 1000;
 const activeTimers = new Set();
-const activeCourseIds = new Set();
+const activeCourseKeys = new Set();
 let scheduleTimer = null;
 
 function getBaseUrl(args) {
@@ -136,10 +136,16 @@ async function fetchTodaySchedule(config, date) {
 	return data;
 }
 
-async function triggerCourse(config, course, attempt = 1) {
+function getCourseKey(course) {
+	return [course.courseName, course.classBeginTime, course.classEndTime].join("|");
+}
+
+async function triggerCourse(config, course, courseKey, attempt = 1) {
+	const courseIds = course.courseIds?.length ? course.courseIds : [course.id];
+	const courseId = courseIds[(attempt - 1) % courseIds.length];
 	try {
 		const response = await fetch(
-			`${baseUrl}/api/course-uuid/cron-sign?courseId=${encodeURIComponent(course.id)}`,
+			`${baseUrl}/api/course-uuid/cron-sign?courseId=${encodeURIComponent(courseId)}`,
 			{
 			headers: {
 				Authorization: `Bearer ${config.cronSecret}`
@@ -149,21 +155,19 @@ async function triggerCourse(config, course, attempt = 1) {
 		);
 		const data = await response.json();
 		console.log(
-			`[${new Date().toISOString()}] ${course.courseName || course.id} sign attempt ${attempt}: ${
-				response.status
-			} ${data.message ?? ""}`
+			`[${new Date().toISOString()}] ${course.courseName || courseId} (${courseId}) sign attempt ${attempt}: ${response.status} ${data.message ?? ""}`
 		);
 
 		if (data.success) {
-			activeCourseIds.delete(course.id);
+			activeCourseKeys.delete(courseKey);
 			return;
 		}
-		setTimer(() => triggerCourse(config, course, attempt + 1), SIGN_RETRY_DELAY_MS);
+		setTimer(() => triggerCourse(config, course, courseKey, attempt + 1), SIGN_RETRY_DELAY_MS);
 	} catch (error) {
 		console.error(
-			`[${new Date().toISOString()}] ${course.courseName || course.id} sign request failed: ${error.message}`
+			`[${new Date().toISOString()}] ${course.courseName || courseId} (${courseId}) sign request failed: ${error.message}`
 		);
-		setTimer(() => triggerCourse(config, course, attempt + 1), SIGN_RETRY_DELAY_MS);
+		setTimer(() => triggerCourse(config, course, courseKey, attempt + 1), SIGN_RETRY_DELAY_MS);
 	}
 }
 
@@ -174,13 +178,24 @@ async function scheduleToday(config) {
 		const data = await fetchTodaySchedule(config, date);
 		const now = Date.now();
 		let scheduled = 0;
+		const courseGroups = new Map();
 
 		for (const course of data.courses ?? []) {
-			if (
-				course.signStatus === "1" ||
-				!/^\d{7}$/.test(course.id ?? "") ||
-				activeCourseIds.has(course.id)
-			) {
+			const courseKey = getCourseKey(course);
+			if (course.signStatus === "1" || !/^\d{7}$/.test(course.id ?? "")) {
+				continue;
+			}
+			const group = courseGroups.get(courseKey);
+			if (group) {
+				group.courseIds.push(course.id);
+			} else {
+				courseGroups.set(courseKey, { ...course, courseIds: [course.id] });
+			}
+		}
+
+		for (const course of courseGroups.values()) {
+			const courseKey = getCourseKey(course);
+			if (activeCourseKeys.has(courseKey)) {
 				continue;
 			}
 
@@ -195,11 +210,11 @@ async function scheduleToday(config) {
 				continue;
 			}
 
-			activeCourseIds.add(course.id);
-			setTimer(() => triggerCourse(config, course), runAt - now);
+			activeCourseKeys.add(courseKey);
+			setTimer(() => triggerCourse(config, course, courseKey), runAt - now);
 			scheduled += 1;
 			console.log(
-				`scheduled ${course.courseName || course.id} at ${new Date(runAt).toLocaleString("zh-CN", {
+				`scheduled ${course.courseName || course.id} (${course.courseIds.join(",")}) at ${new Date(runAt).toLocaleString("zh-CN", {
 					timeZone: "Asia/Shanghai"
 				})}`
 			);
