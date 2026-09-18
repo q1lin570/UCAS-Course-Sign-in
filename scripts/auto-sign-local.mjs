@@ -9,10 +9,25 @@ const configPath = join(projectRoot, "config", "ucas-account.json");
 const baseUrl = getBaseUrl(process.argv.slice(2));
 const SIGN_WINDOW_BEFORE_MS = 10 * 60 * 1000;
 const SIGN_RETRY_DELAY_MS = 30 * 1000;
-const SCHEDULE_RETRY_DELAY_MS = 5 * 60 * 1000;
+const SCHEDULE_RETRY_DELAY_MS = toPositiveInt(process.env.AUTO_SIGN_SCHEDULE_RETRY_DELAY_MS, 5 * 60 * 1000);
+const SCHEDULE_MAX_ATTEMPTS = toPositiveInt(process.env.AUTO_SIGN_SCHEDULE_MAX_ATTEMPTS, 3);
 const activeTimers = new Set();
 const activeCourseKeys = new Set();
 let scheduleTimer = null;
+
+class ScheduleFetchError extends Error {
+	constructor(message, { status = 0, retryAfterMs = 0 } = {}) {
+		super(message);
+		this.name = "ScheduleFetchError";
+		this.status = status;
+		this.retryAfterMs = retryAfterMs;
+	}
+}
+
+function toPositiveInt(value, fallback) {
+	const parsed = Number.parseInt(value ?? "", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function getBaseUrl(args) {
 	const index = args.indexOf("--base-url");
@@ -129,9 +144,13 @@ async function fetchTodaySchedule(config, date) {
 		body: JSON.stringify({ username: config.username, password: config.password, date }),
 		cache: "no-store"
 	});
-	const data = await response.json();
+	const data = await response.json().catch(() => ({}));
 	if (!response.ok) {
-		throw new Error(data.message ?? `课表查询失败（HTTP ${response.status}）`);
+		const retryAfterSeconds = Number.parseInt(response.headers.get("retry-after") ?? "", 10);
+		throw new ScheduleFetchError(data.message ?? `课表查询失败（HTTP ${response.status}）`, {
+			status: response.status,
+			retryAfterMs: Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 0
+		});
 	}
 	return data;
 }
@@ -171,11 +190,22 @@ async function triggerCourse(config, course, courseKey, attempt = 1) {
 	}
 }
 
-async function scheduleToday(config) {
+function scheduleNextDay(config) {
+	const nextRefreshDelay = Math.max(1000, nextScheduleAt() - Date.now());
+	setScheduleTimer(() => scheduleToday(config), nextRefreshDelay);
+}
+
+async function scheduleToday(config, attempt = 1) {
 	const date = getBeijingDateString();
 
 	try {
 		const data = await fetchTodaySchedule(config, date);
+		if (data.noCourses === true || data.total === 0) {
+			console.log(`[${new Date().toISOString()}] ${date}: no courses, no schedule retry`);
+			scheduleNextDay(config);
+			return;
+		}
+
 		const now = Date.now();
 		let scheduled = 0;
 		const courseGroups = new Map();
@@ -222,8 +252,22 @@ async function scheduleToday(config) {
 
 		console.log(`[${new Date().toISOString()}] ${date}: checked ${data.total ?? 0}, scheduled ${scheduled}`);
 	} catch (error) {
-		console.error(`[${new Date().toISOString()}] schedule fetch failed: ${error.message}`);
-		setScheduleTimer(() => scheduleToday(config), SCHEDULE_RETRY_DELAY_MS);
+		const retryAfterMs = error instanceof ScheduleFetchError ? error.retryAfterMs : 0;
+		const retryDelayMs = Math.max(SCHEDULE_RETRY_DELAY_MS, retryAfterMs);
+		if (attempt < SCHEDULE_MAX_ATTEMPTS) {
+			console.error(
+				`[${new Date().toISOString()}] schedule fetch failed (attempt ${attempt}/${SCHEDULE_MAX_ATTEMPTS}, ` +
+					`status ${error.status ?? "unknown"}): ${error.message}; retrying in ${Math.ceil(retryDelayMs / 1000)}s`
+			);
+			setScheduleTimer(() => scheduleToday(config, attempt + 1), retryDelayMs);
+			return;
+		}
+
+		console.error(
+			`[${new Date().toISOString()}] schedule fetch failed after ${SCHEDULE_MAX_ATTEMPTS} attempts; ` +
+			`skip today: ${error.message}`
+		);
+		scheduleNextDay(config);
 		return;
 	}
 
@@ -234,7 +278,9 @@ async function scheduleToday(config) {
 try {
 	const config = await readConfig();
 
-	console.log(`Local auto-sign scheduler started for ${baseUrl}`);
+	console.log(
+		`Local auto-sign scheduler started for ${baseUrl}; schedule query attempts limited to ${SCHEDULE_MAX_ATTEMPTS}`
+	);
 	const todayEight = beijingEight(getBeijingDateString());
 	if (Date.now() < todayEight) {
 		console.log(`today's schedule will be fetched at ${new Date(todayEight).toLocaleString("zh-CN", {

@@ -18,6 +18,7 @@ type QueryResponse = {
 	date: string;
 	total: number;
 	courses: CourseItem[];
+	noCourses?: boolean;
 };
 
 type DirectSignResponse = {
@@ -525,7 +526,11 @@ export default function Home() {
 			}
 
 			setCourses(data.courses ?? []);
-			updateStatus("success", `已查询到 ${data.total} 门课程（${data.date}）`);
+			if (data.noCourses || data.total === 0) {
+				updateStatus("info", `当天无课程（${data.date}）`);
+			} else {
+				updateStatus("success", `已查询到 ${data.total} 门课程（${data.date}）`);
+			}
 		} catch {
 			setCourses([]);
 			updateStatus("error", "网络异常，请稍后重试");
